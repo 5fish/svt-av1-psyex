@@ -1,10 +1,14 @@
 name: CI build
 
 on:
+  workflow_dispatch:
   push:
-    branches: [ "master" ]
+    branches: [ "master", "testing" ]
   pull_request:
     branches: [ "master", "testing" ]
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -15,26 +19,23 @@ jobs:
       matrix:
         config:
           - {
-              name: "Windows MSVC 64 Bit",
-              os: windows-2022,
-              environment_script: "C:/Program Files/Microsoft Visual Studio/2022/Enterprise/VC/Auxiliary/Build/vcvars64.bat",
-              generators: "Visual Studio 17 2022",
-              msvc_arch: x64
+              name: "Windows x86-64-v3",
+              os: windows-latest,
+              generators: "Ninja",
+              msvc_arch: x64,
+              c_compiler: clang,
+              cpp_compiler: clang++,
+              march: "x86-64-v3"
             }
           - {
-              name: "Ubuntu Latest",
-              os: ubuntu-latest,
-              c_compiler: gcc,
-              cpp_compiler: g++,
-            }
-          - {
-              name: "Ubuntu Latest (Clang)",
+              name: "Linux x86-64-v3",
               os: ubuntu-latest,
               c_compiler: clang,
               cpp_compiler: clang++,
+              march: "x86-64-v3"
             }
           - {
-              name: "Mac OS Latest arm64",
+              name: "macOS ARM64",
               os: macos-latest,
               c_compiler: clang,
               cpp_compiler: clang++,
@@ -43,18 +44,36 @@ jobs:
     env:
       CMAKE_GENERATOR: "${{ matrix.config.generators }}"
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
+      with: 
+        fetch-tags: true
     - uses: ilammy/setup-nasm@v1
-    - run: git fetch --prune --unshallow
-    - name: Ubuntu/Mac OS X
-      if: ${{ !contains( matrix.config.generators, 'Visual Studio' ) }}
+    - uses: KyleMayes/install-llvm-action@v2
+      with:
+        version: "21"
+    - name: Windows build
+      if: contains( matrix.config.os, 'windows' )
       run: |
-        cmake --fresh -B Build -DCMAKE_BUILD_TYPE=Release "-DCMAKE_CXX_COMPILER=${{ matrix.config.cpp_compiler }}" "-DCMAKE_C_COMPILER=${{ matrix.config.c_compiler }}" -DNATIVE=ON -DSVT_AV1_LTO=ON -DBUILD_APPS=ON -DBUILD_DEC=OFF -DREPRODUCIBLE_BUILDS=ON "-DCMAKE_OSX_ARCHITECTURES=${{ matrix.config.osx_arch }}"
-        cmake --build Build --config Release --parallel $(getconf _NPROCESSORS_ONLN 2> /dev/null || nproc 2> /dev/null || sysctl -n hw.ncpu 2> /dev/null)
-      shell: bash
-    - name: MSVC build
-      if: contains( matrix.config.generators, 'Visual Studio' )
-      run: |
-        cmake -B Build -A "${{ matrix.config.msvc_arch }}" -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DBUILD_APPS=ON -DBUILD_DEC=OFF -DREPRODUCIBLE_BUILDS=ON
-        cmake --build Build --config Release
+        set CC=${{ matrix.config.c_compiler }}
+        set CXX=${{ matrix.config.cpp_compiler }}
+        cmake --fresh -B svt_build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DSVT_AV1_LTO=OFF -DENABLE_AVX512=ON -DCMAKE_C_FLAGS_RELEASE="-flto -march=${{ matrix.config.march }} -O2 -DNDEBUG" -DCMAKE_CXX_FLAGS_RELEASE="-flto -march=${{ matrix.config.march }} -O2 -DNDEBUG"
+        ninja -C svt_build
       shell: cmd
+    - name: Ubuntu build
+      if: contains( matrix.config.os, 'ubuntu' )
+      run: |
+        cmake --fresh -B svt_build -DCMAKE_BUILD_TYPE=Release "-DCMAKE_CXX_COMPILER=${{ matrix.config.cpp_compiler }}" "-DCMAKE_C_COMPILER=${{ matrix.config.c_compiler }}" -DBUILD_SHARED_LIBS=OFF -DSVT_AV1_LTO=OFF -DENABLE_AVX512=ON "-DCMAKE_C_FLAGS_RELEASE=-flto -march=${{ matrix.config.march }} -O3 -DNDEBUG" "-DCMAKE_CXX_FLAGS_RELEASE=-flto -march=${{ matrix.config.march }} -O3 -DNDEBUG"
+        cmake --build svt_build --config Release
+      shell: bash
+    - name: macOS build
+      if: contains( matrix.config.os, 'macos' )
+      run: |
+        cmake --fresh -B svt_build -DCMAKE_BUILD_TYPE=Release "-DCMAKE_CXX_COMPILER=${{ matrix.config.cpp_compiler }}" "-DCMAKE_C_COMPILER=${{ matrix.config.c_compiler }}" -DBUILD_SHARED_LIBS=OFF -DSVT_AV1_LTO=OFF -DENABLE_AVX512=OFF -DCMAKE_C_FLAGS_RELEASE="-O3 -DNDEBUG" -DCMAKE_CXX_FLAGS_RELEASE="-O3 -DNDEBUG" "-DCMAKE_OSX_ARCHITECTURES=${{ matrix.config.osx_arch }}"
+        cmake --build svt_build --config Release
+      shell: bash
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v6
+      with:
+        name: ${{ matrix.config.name }}
+        path: Bin/Release/SvtAv1EncApp*
+        retention-days: 90
